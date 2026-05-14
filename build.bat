@@ -1,4 +1,5 @@
 @echo off
+
 echo [BUILD] Limpando ambiente e instalando versoes compativeis com XP...
 
 :: Forçar a remoção de pacotes instalados incorretamente
@@ -14,8 +15,7 @@ C:\Python34\python.exe -m pip install --no-cache-dir pyinstaller==3.3
 
 echo.
 echo [BUILD] Iniciando compilacao...
-:: Se o Pillow falhar, o código linkdrop_server.py ignora e funciona sem ele.
-C:\Python34\Scripts\pyinstaller.exe --onefile --windowed --name "LinkDrop" --icon "linkdrop.ico" linkdrop_server.py
+C:\Python34\Scripts\pyinstaller.exe --onefile --windowed --name "LinkDrop" --icon "linkdrop.ico" --add-data "linkdrop.ico;." linkdrop_server.py
 
 echo.
 echo Build finalizado. Verifique a pasta 'dist'.
