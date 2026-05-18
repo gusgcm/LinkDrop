@@ -49,7 +49,7 @@ def resource_path(rp):
     base = sys._MEIPASS if (getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')) else os.path.abspath(".")
     return os.path.join(base, rp)
 
-APP_VERSION  = "1.0.2"
+APP_VERSION  = "1.0.3"
 DEFAULT_PORT = 8765
 _HOSTNAME    = socket.gethostname() or "LinkDrop-PC"
 _CHUNK       = 131072  # 128KB
@@ -362,19 +362,38 @@ def import_local_path_to_share(src_path):
     base = os.path.basename(src_path.rstrip(os.sep))
     if not base:
         return "skip", "", ["caminho invalido"]
-    dst = unique_path_under_share(base)
     try:
         if os.path.isfile(src_path):
+            dst = unique_path_under_share(base)
             shutil.copy2(src_path, dst)
             return "file", os.path.basename(dst), []
         if os.path.isdir(src_path):
-            os.makedirs(dst)
-            nfiles, errs = copy_tree_into_share(src_path, dst)
-            if not nfiles and errs:
-                try: os.rmdir(dst)
-                except: pass
-                return "skip", "", errs
-            return "dir", os.path.basename(dst), errs
+            share_abs = os.path.abspath(cfg["share_path"])
+            files_created = []
+            errors = []
+            for item in os.listdir(src_path):
+                src_item = os.path.join(src_path, item)
+                if os.path.isfile(src_item):
+                    dst = unique_path_under_share(item)
+                    try:
+                        shutil.copy2(src_item, dst)
+                        files_created.append(item)
+                    except Exception as e:
+                        errors.append("%s: %s" % (item, e))
+                elif os.path.isdir(src_item):
+                    dst = os.path.join(share_abs, item)
+                    if os.path.exists(dst):
+                        dst = unique_path_under_share(item)
+                    try:
+                        os.makedirs(dst)
+                        nfiles, errs = copy_tree_into_share(src_item, dst)
+                        files_created.append(item)
+                        errors.extend(errs)
+                    except Exception as ex:
+                        errors.append("%s: %s" % (item, ex))
+            if not files_created and errors:
+                return "skip", "", errors
+            return "dir", base, errors
     except Exception as ex:
         return "skip", "", [str(ex)]
     return "skip", "", ["nao e arquivo nem pasta"]
@@ -433,39 +452,38 @@ class RemotePCClient:
         ips.discard("127.0.0.1")
         return ips
 
+    def _check_tcp_connection(self, host, port, timeout=1):
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+            sock.close()
+            return True
+        except: return False
+
     def _try_host(self, host, short_timeout):
+        if not self._check_tcp_connection(host, self.port, 1):
+            raise Exception("Conexão falhou")
         url  = "http://%s:%d/ping" % (host, self.port)
         req  = urllib.request.Request(url, headers=self._auth_header(), method="GET")
         try:
             with urllib.request.urlopen(req, timeout=short_timeout) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as e:
-            if e.code == 401: raise PermissionError("Senha incorreta — verifique a senha do PC remoto")
-            raise
+            if e.code == 401: raise Exception("Conexão falhou")
+            raise Exception("Conexão falhou")
+        except Exception as e:
+            raise Exception("Conexão falhou")
 
     def ping(self):
-        errors = []
         try:
-            info = self._try_host(self.host, 3)
+            info = self._try_host(self.host, 1)
             self._working_host = self.host
             self._notify("info", "Conectado ao PC Remoto: %s (%s)" % (info.get("name", self.host), self.host))
             return True, info
         except Exception as e:
-            errors.append("DDNS/IP '%s': %s" % (self.host, e))
-
-        local_ips = self._get_local_ips()
-        for ip in [i for i in list(local_ips) + ["127.0.0.1"] if i != self.host]:
-            try:
-                info = self._try_host(ip, 2)
-                self._working_host = ip
-                self._notify("info", "Conectado ao PC Remoto via IP Local: %s (%s)" % (info.get("name", ip), ip))
-                return True, info
-            except Exception as e:
-                errors.append("Local '%s': %s" % (ip, e))
-
-        first = errors[0] if errors else "Sem resposta"
-        self._notify("error", "Falha ao conectar em %s: %s" % (self.host, first))
-        return False, first
+            error_msg = str(e)
+        return False, "Falha na conexão"
 
     def _request(self, method, path, data=None, extra_headers=None):
         url  = self._base_url() + path
@@ -473,10 +491,9 @@ class RemotePCClient:
         if extra_headers: hdrs.update(extra_headers)
         req = urllib.request.Request(url, data=data, headers=hdrs, method=method)
         try:
-            resp = urllib.request.urlopen(req, timeout=self.timeout)
-        except urllib.error.HTTPError as e:
-            if e.code == 401: raise PermissionError("Senha incorreta — verifique a senha do PC remoto")
-            raise
+            resp = urllib.request.urlopen(req, timeout=1)
+        except Exception as e:
+            raise Exception("Falha na conexão")
         with resp: return resp.status, resp.read()
 
     def list_files(self, sub_dir=""):
@@ -511,7 +528,7 @@ class RemotePCClient:
             resp = conn.getresponse()
 
             if resp.status == 401:
-                raise PermissionError("Senha incorreta - verifique a senha do PC remoto")
+                raise Exception("Falha na conexão")
             if resp.status == 416 and resume_from > 0:
                 with self._dl_lock: self._active_dl_conn = None
                 conn.close(); resume_from = 0
@@ -522,7 +539,7 @@ class RemotePCClient:
                 conn.request("GET", "/files/" + quote(rel_path), headers=self._auth_header())
                 resp = conn.getresponse()
                 if resp.status == 401:
-                    raise PermissionError("Senha incorreta - verifique a senha do PC remoto")
+                    raise Exception("Falha na conexão")
             if resp.status not in (200, 206):
                 raise IOError("HTTP %d ao baixar %s" % (resp.status, rel_path))
 
@@ -549,7 +566,7 @@ class RemotePCClient:
                     if state: state["downloaded"] = downloaded
                     if progress_cb:
                         now = time.time()
-                        if now - last_rpt >= 0.25 or downloaded >= total:
+                        if now - last_rpt >= 0.1 or downloaded >= total:
                             elapsed = now - start
                             speed   = (downloaded - resume_from) / elapsed if elapsed > 0 else 0
                             eta     = (total - downloaded) / speed if speed > 0 and total else 0
@@ -570,7 +587,6 @@ class RemotePCClient:
         return dest
 
     def _open_upload_conn(self, rel_path, file_size):
-        """Opens an HTTP connection for upload, returns (conn,) ready to stream."""
         host = self._working_host or self.host
         conn = http.client.HTTPConnection(host, self.port, timeout=self.timeout)
         conn.putrequest("POST", "/upload")
@@ -585,7 +601,7 @@ class RemotePCClient:
         body = resp.read()
         conn.close()
         if resp.status == 401:
-            raise PermissionError("Senha incorreta — verifique a senha do PC remoto")
+            raise Exception("Falha na conexão")
         saved = json.loads(body.decode("utf-8")).get("name", os.path.basename(local_path))
         self._notify("info", "Upload concluído para o PC Remoto [%s]: %s" % (self.host, saved))
         return saved
@@ -612,7 +628,7 @@ class RemotePCClient:
                 conn.send(chunk); sent += len(chunk)
                 if progress_cb:
                     now = time.time()
-                    if now - last_rpt >= 0.25 or sent >= file_size:
+                    if now - last_rpt >= 0.1 or sent >= file_size:
                         elapsed = now - start
                         speed   = sent / elapsed if elapsed > 0 else 0
                         eta     = (file_size - sent) / speed if speed > 0 else 0
@@ -621,6 +637,7 @@ class RemotePCClient:
         return self._finish_upload(conn, local_path)
 
     def upload_folder(self, local_dir, progress_cb=None, cancel_event=None, file_done_cb=None):
+        folder_name  = os.path.basename(local_dir.rstrip(os.sep))
         parent_dir   = os.path.dirname(local_dir.rstrip(os.sep))
         total_bytes  = total_files = 0
         file_list    = []
@@ -645,7 +662,7 @@ class RemotePCClient:
                         if not chunk: break
                         conn.send(chunk)
                 resp = conn.getresponse(); body = resp.read()
-                if resp.status == 401: raise PermissionError("Senha incorreta — verifique a senha do PC remoto")
+                if resp.status == 401: raise Exception("Falha na conexão")
                 done_bytes += sz; completed += 1
                 if progress_cb: progress_cb(done_bytes, total_bytes, 0, 0)
                 if file_done_cb: file_done_cb(rel, completed, total_files)
@@ -718,6 +735,8 @@ class LinkDropHandler(BaseHTTPRequestHandler):
         path   = parsed.path.rstrip("/")
 
         if path == "/ping":
+            if not check_auth(self.headers):
+                self._send_json(401, {"error": "Unauthorized"}); return
             self._send_json(200, {"status": "ok", "version": APP_VERSION, "name": _HOSTNAME}); return
 
         if not check_auth(self.headers):
@@ -1014,7 +1033,7 @@ class LinkDropGUI:
             for msg_type, _payload in batch:
                 if msg_type == "refresh": self._refresh_files()
         except: pass
-        self.root.after(100, self._pump_ui_queue)
+        self.root.after(50, self._pump_ui_queue)
 
     def toggle_automation(self):
         cfg["autostart"] = (self.automation_var.get() == 1)
@@ -1434,14 +1453,13 @@ class LinkDropGUI:
                 total_bytes += os.path.getsize(p)
                 copy_ops.append((p, unique_path_under_share(base), None))
             elif os.path.isdir(p):
-                dst_root = unique_path_under_share(base)
-                try: os.makedirs(dst_root)
-                except: pass
+                share_abs = os.path.abspath(cfg["share_path"])
+                parent_dir = os.path.dirname(p.rstrip(os.sep))
                 for root, _dirs, files in os.walk(p):
                     for fn in files:
                         src_fp = os.path.join(root, fn)
-                        rel    = os.path.relpath(src_fp, os.path.dirname(p))
-                        dst_fp = os.path.join(dst_root, rel)
+                        rel    = os.path.relpath(src_fp, parent_dir)
+                        dst_fp = os.path.join(share_abs, rel)
                         try: os.makedirs(os.path.dirname(dst_fp))
                         except: pass
                         total_bytes += os.path.getsize(src_fp)
@@ -1615,9 +1633,8 @@ class LinkDropGUI:
             iid = str(idx)
             if not self.pc_tree.exists(iid): continue
             hp = "%s:%d" % (pc.get("host"), pc.get("port"))
-            self.pc_tree.item(iid, values=(pc.get("name"), hp, _T("pc_status_connecting")))
             def check(ti, cl):
-                ok = cl.ping()[0]
+                ok, _ = cl.ping()
                 status = _T("pc_status_online") if ok else _T("pc_status_offline")
                 def _upd(ti=ti, status=status):
                     if self.pc_tree.exists(ti):
@@ -1638,9 +1655,16 @@ class LinkDropGUI:
         self._cancel_is_user_action = True
         self._cancel_event.set()
         iid = self._current_connected_iid
+        pc_name = ""
+        pc_host = ""
         if iid:
             client = self._remote_clients.get(iid)
-            if client: client.abort_download()
+            if client:
+                pc_name = self.pc_tree.item(iid, "values")[0] if self.pc_tree.exists(iid) else ""
+                pc_host = self.pc_tree.item(iid, "values")[1] if self.pc_tree.exists(iid) else ""
+                client.abort_download()
+            if self.pc_tree.exists(iid):
+                self.pc_tree.item(iid, values=(pc_name, pc_host, _T("pc_status_offline")))
         for state in self._pending_transfers.values():
             dp = state.get("dest_path", "")
             if dp and os.path.isfile(dp):
@@ -1666,6 +1690,7 @@ class LinkDropGUI:
         self._cancel_event.clear()
         self._pending_transfers.clear()
         pc_name = self.pc_tree.item(iid, "values")[0]
+        pc_host = self.pc_tree.item(iid, "values")[1]
         self.lbl_remote_files.config(text="%s %s..." % (_T("pc_files_title"), pc_name))
         self.remote_files_tree.delete(*self.remote_files_tree.get_children())
         self.remote_files_tree.insert("", tk.END, text=_T("pc_status_connecting"), values=("","",""))
@@ -1676,7 +1701,9 @@ class LinkDropGUI:
         def fetch():
             success, info = client.ping()
             if not success:
-                self.root.after(0, lambda: self._show_remote_error(info)); return
+                self.root.after(0, lambda: self.pc_tree.item(iid, values=(pc_name, pc_host, _T("pc_status_offline"))))
+                self.root.after(0, lambda: self._show_remote_error("Falha na conexão")); return
+            self.root.after(0, lambda: self.pc_tree.item(iid, values=(pc_name, pc_host, _T("pc_status_online"))))
             try:
                 self._current_remote_dir = ""
                 files = client.list_files("")
@@ -1685,7 +1712,7 @@ class LinkDropGUI:
                     self.root.after(0, lambda b=b: getattr(self, "btn_" + b).config(state="normal"))
                 self.root.after(0, lambda: self._schedule_remote_refresh(iid, client))
             except Exception as e:
-                self.root.after(0, lambda: self._show_remote_error(str(e)))
+                self.root.after(0, lambda: self._show_remote_error("Falha na conexão"))
 
         threading.Thread(target=fetch, daemon=True).start()
 
@@ -1693,7 +1720,7 @@ class LinkDropGUI:
         self.remote_files_tree.delete(*self.remote_files_tree.get_children())
         self.remote_files_tree.insert("", tk.END, text="%s%s" % (_T("pc_connect_error"), message), values=("","",""))
 
-    def _schedule_remote_refresh(self, iid, client, interval_ms=3000):
+    def _schedule_remote_refresh(self, iid, client, interval_ms=500):
         if not self._remote_auto_refresh_active or self._current_connected_iid != iid: return
 
         def silent_fetch():
@@ -1701,7 +1728,18 @@ class LinkDropGUI:
             try:
                 files = client.list_files(self._current_remote_dir)
                 self.root.after(0, lambda: self._render_remote_files(iid, files))
-            except: pass
+            except:
+                if self._remote_auto_refresh_active and self._current_connected_iid == iid:
+                    pc_name = self.pc_tree.item(iid, "values")[0] if self.pc_tree.exists(iid) else ""
+                    pc_host = self.pc_tree.item(iid, "values")[1] if self.pc_tree.exists(iid) else ""
+                    self.root.after(0, lambda: self.pc_tree.item(iid, values=(pc_name, pc_host, _T("pc_status_offline"))))
+                    self._stop_remote_auto_refresh()
+                    self._current_connected_iid = None
+                    self.root.after(0, lambda: self.btn_disconnect_pc.config(state="disabled"))
+                    self.root.after(0, lambda: self.btn_upload_file.config(state="disabled"))
+                    self.root.after(0, lambda: self.btn_upload_folder.config(state="disabled"))
+                    self.root.after(0, lambda: self._show_remote_error("Falha na conexão"))
+                return
             if self._remote_auto_refresh_active and self._current_connected_iid == iid:
                 self._remote_auto_refresh_id = self.root.after(
                     interval_ms, lambda: self._schedule_remote_refresh(iid, client, interval_ms))
@@ -1784,7 +1822,7 @@ class LinkDropGUI:
                 files = client.list_files(cur_dir)
                 self.root.after(0, lambda: self._render_remote_files(cur_iid, files))
             except Exception as e:
-                self.root.after(0, lambda: self._show_remote_error(str(e)))
+                self.root.after(0, lambda: self._show_remote_error("Falha na conexão"))
         threading.Thread(target=fetch, daemon=True).start()
 
     def _download_remote_file(self):
@@ -1863,6 +1901,7 @@ class LinkDropGUI:
                     self.root.after(0, self._progress_finish)
                     if not self._cancel_event.is_set():
                         self.root.after(0, lambda: messagebox.showinfo("Upload", "%s%s" % (_T("pc_upload_ok"), os.path.basename(folder))))
+                        self._refresh_remote_current_dir()
                 except TransferCancelled: self.root.after(0, self._progress_hide)
                 except Exception as e:
                     self.root.after(0, self._progress_hide)
@@ -1892,6 +1931,7 @@ class LinkDropGUI:
                 self.root.after(0, self._progress_finish)
                 if not cancelled:
                     self.root.after(0, lambda: messagebox.showinfo("Upload", "%s%d arquivo(s)" % (_T("pc_upload_ok"), len(paths))))
+                    self._refresh_remote_current_dir()
             threading.Thread(target=do_uf, daemon=True).start()
 
     def _add_pc_dialog(self):
@@ -2096,48 +2136,54 @@ class LinkDropGUI:
         if self._is_dragging: return
         if sub_dir is not None:
             self._current_local_dir = sub_dir
-        base_share = os.path.abspath(cfg["share_path"])
-        target_dir = os.path.abspath(os.path.join(base_share, self._current_local_dir)) if self._current_local_dir else base_share
-        if not target_dir.startswith(base_share): return
 
-        tree = self.file_tree
         cur_sel = set(
-            tree.item(i, "values")[0]
-            for i in tree.selection()
-            if tree.item(i, "values")
+            self.file_tree.item(i, "values")[0]
+            for i in self.file_tree.selection()
+            if self.file_tree.item(i, "values")
         )
-        tree.delete(*tree.get_children())
 
-        if self._current_local_dir:
-            parent_dir = os.path.dirname(self._current_local_dir.replace("\\", "/"))
-            tree.insert("", "end", values=("..", "", "", "DIR"), tags=("__back__", parent_dir))
+        def _do_refresh():
+            base_share = os.path.abspath(cfg["share_path"])
+            target_dir = os.path.abspath(os.path.join(base_share, self._current_local_dir)) if self._current_local_dir else base_share
+            if not target_dir.startswith(base_share): return
 
-        try: names = os.listdir(target_dir)
-        except: self.lbl_files_count.config(text="0"); return
+            try: names = os.listdir(target_dir)
+            except: self.root.after(0, lambda: self.lbl_files_count.config(text="0")); return
 
-        items = []
-        for name in names:
-            try:
-                full = os.path.join(target_dir, name)
-                st   = os.stat(full)
-                items.append((name, st, os.path.isdir(full)))
-            except: pass
+            items = []
+            for name in names:
+                try:
+                    full = os.path.join(target_dir, name)
+                    st   = os.stat(full)
+                    items.append((name, st, os.path.isdir(full)))
+                except: pass
 
-        items.sort(key=lambda x: (not x[2], x[0].lower()))
-        for name, st, is_dir in items:
-            sz  = "-" if is_dir else _fmt_size(st.st_size)
-            mod = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
-            ext = "DIR" if is_dir else (os.path.splitext(name)[1].lstrip(".").upper() or "FILE")
-            rel = os.path.relpath(os.path.join(target_dir, name), base_share).replace("\\", "/")
-            node = tree.insert("", "end", values=(name, sz, mod, ext), tags=(rel,))
-            if name in cur_sel: tree.selection_add(node)
+            items.sort(key=lambda x: (not x[2], x[0].lower()))
 
-        self.lbl_files_count.config(text=str(len(items)))
+            def _update_tree():
+                tree = self.file_tree
+                tree.delete(*tree.get_children())
+                if self._current_local_dir:
+                    parent_dir = os.path.dirname(self._current_local_dir.replace("\\", "/"))
+                    tree.insert("", "end", values=("..", "", "", "DIR"), tags=("__back__", parent_dir))
+                for name, st, is_dir in items:
+                    sz  = "-" if is_dir else _fmt_size(st.st_size)
+                    mod = datetime.fromtimestamp(st.st_mtime).strftime("%Y-%m-%d %H:%M")
+                    ext = "DIR" if is_dir else (os.path.splitext(name)[1].lstrip(".").upper() or "FILE")
+                    rel = os.path.relpath(os.path.join(target_dir, name), base_share).replace("\\", "/")
+                    node = tree.insert("", "end", values=(name, sz, mod, ext), tags=(rel,))
+                    if name in cur_sel: tree.selection_add(node)
+                self.lbl_files_count.config(text=str(len(items)))
+
+            self.root.after(0, _update_tree)
+
+        threading.Thread(target=_do_refresh, daemon=True).start()
 
     def _auto_refresh(self):
         if self.running: self._refresh_files()
-        recent = (time.time() - self._last_activity_ts) < 30
-        interval = 1000 if recent else 3000
+        recent = (time.time() - self._last_activity_ts) < 10
+        interval = 500 if recent else 2000
         self.root.after(interval, self._auto_refresh)
 
     def _open_file(self, _e=None):
