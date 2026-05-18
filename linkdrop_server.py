@@ -309,6 +309,14 @@ def _T(key):
 def _C(key):
     return _theme_cache.get(key) or THEMES["dark"][key]
 
+def _safe_widget_call(widget, method, *args, **kwargs):
+    try:
+        if widget and widget.winfo_exists():
+            return method(*args, **kwargs)
+    except Exception:
+        pass
+    return None
+
 _reload_colors(); _reload_lang()
 
 def DARK_BG():  return _C("DARK_BG")
@@ -923,6 +931,7 @@ class LinkDropGUI:
 
         self._dnd_hwnd     = None
         self._dnd_old_proc = None
+        self._shutdown_flag = False
 
         self._refresh_interval = 3000   
         self._last_activity_ts = 0.0
@@ -2105,50 +2114,64 @@ class LinkDropGUI:
         self.root.after(0, lambda: self._handle_event(event))
 
     def _handle_event(self, event):
-        self._activity_log.append(event)
-        self._log_event(event)
-        etype = event.get("type", "")
-        if etype in ("upload", "text", "delete"):
-            self._refresh_files()
-        if etype == "clipboard":
-            self.clip_box.delete("1.0", "end")
-            self.clip_box.insert("end", event.get("content", ""))
-        today = datetime.now().strftime("%Y-%m-%d")
-        cnt   = sum(1 for e in self._activity_log if e.get("time", "").startswith(today))
-        self.lbl_events_count.config(text=str(cnt))
-        self._last_activity_ts = time.time()
+        try:
+            self._activity_log.append(event)
+            self._log_event(event)
+            etype = event.get("type", "")
+            if etype in ("upload", "text", "delete"):
+                self._refresh_files()
+            if etype == "clipboard":
+                if hasattr(self, 'clip_box') and self.clip_box.winfo_exists():
+                    self.clip_box.delete("1.0", "end")
+                    self.clip_box.insert("end", event.get("content", ""))
+            today = datetime.now().strftime("%Y-%m-%d")
+            cnt   = sum(1 for e in self._activity_log if e.get("time", "").startswith(today))
+            if hasattr(self, 'lbl_events_count') and self.lbl_events_count.winfo_exists():
+                self.lbl_events_count.config(text=str(cnt))
+            self._last_activity_ts = time.time()
+        except Exception: pass
 
     _LOG_TYPE_TAG = {"upload":"upload","text":"text","clipboard":"clip","notification":"notify","delete":"delete"}
     _LOG_TYPE_LBL = {"upload":"UP","text":"TXT","clipboard":"CLP","notification":"NOT","delete":"DEL","info":"INF"}
 
     def _log_event(self, event):
-        etype   = event.get("type", "info")
-        ts      = event.get("time", "")[:19].replace("T", " ")
-        content = event.get("content", event.get("name", ""))
-        tag     = self._LOG_TYPE_TAG.get(etype, "info")
-        lbl     = self._LOG_TYPE_LBL.get(etype, "*")
-        self.activity_box.config(state="normal")
-        self.activity_box.insert("end", "  %s  " % ts, "time")
-        self.activity_box.insert("end", "[%s] %s\n" % (lbl, content[:80]), tag)
-        self.activity_box.see("end")
-        self.activity_box.config(state="disabled")
+        try:
+            if not hasattr(self, 'activity_box') or not self.activity_box.winfo_exists(): return
+            etype   = event.get("type", "info")
+            ts      = event.get("time", "")[:19].replace("T", " ")
+            content = event.get("content", event.get("name", ""))
+            tag     = self._LOG_TYPE_TAG.get(etype, "info")
+            lbl     = self._LOG_TYPE_LBL.get(etype, "*")
+            self.activity_box.config(state="normal")
+            self.activity_box.insert("end", "  %s  " % ts, "time")
+            self.activity_box.insert("end", "[%s] %s\n" % (lbl, content[:80]), tag)
+            self.activity_box.see("end")
+            self.activity_box.config(state="disabled")
+        except Exception: pass
 
     def _clear_log(self):
-        self.activity_box.config(state="normal")
-        self.activity_box.delete("1.0", "end")
-        self.activity_box.config(state="disabled")
-        self._activity_log.clear()
+        try:
+            if not hasattr(self, 'activity_box') or not self.activity_box.winfo_exists(): return
+            self.activity_box.config(state="normal")
+            self.activity_box.delete("1.0", "end")
+            self.activity_box.config(state="disabled")
+            self._activity_log.clear()
+        except Exception: pass
 
     def _refresh_files(self, sub_dir=None):
-        if self._is_dragging: return
-        if sub_dir is not None:
-            self._current_local_dir = sub_dir
+        try:
+            if self._is_dragging: return
+            if not hasattr(self, 'file_tree') or not self.file_tree.winfo_exists(): return
+            if sub_dir is not None:
+                self._current_local_dir = sub_dir
 
-        cur_sel = set(
-            self.file_tree.item(i, "values")[0]
-            for i in self.file_tree.selection()
-            if self.file_tree.item(i, "values")
-        )
+            cur_sel = set(
+                self.file_tree.item(i, "values")[0]
+                for i in self.file_tree.selection()
+                if self.file_tree.item(i, "values")
+            )
+        except Exception:
+            return
 
         def _do_refresh():
             base_share = os.path.abspath(cfg["share_path"])
@@ -2194,21 +2217,24 @@ class LinkDropGUI:
         self.root.after(interval, self._auto_refresh)
 
     def _open_file(self, _e=None):
-        sel = self.file_tree.selection()
-        if not sel: return
-        item   = sel[0]
-        values = self.file_tree.item(item, "values")
-        tags   = self.file_tree.item(item, "tags")
-        if not values: return
-        ext    = values[3] if len(values) > 3 else ""
-        if tags and tags[0] == "__back__":
-            self._refresh_files(tags[1]); return
-        rel_path  = tags[0]
-        full_path = os.path.abspath(os.path.join(cfg["share_path"], rel_path))
-        if os.path.isdir(full_path) or ext == "DIR":
-            self._refresh_files(rel_path); return
-        try: os.startfile(full_path)
-        except Exception as e: messagebox.showerror("Erro", str(e))
+        try:
+            if not hasattr(self, 'file_tree') or not self.file_tree.winfo_exists(): return
+            sel = self.file_tree.selection()
+            if not sel: return
+            item   = sel[0]
+            values = self.file_tree.item(item, "values")
+            tags   = self.file_tree.item(item, "tags")
+            if not values: return
+            ext    = values[3] if len(values) > 3 else ""
+            if tags and tags[0] == "__back__":
+                self._refresh_files(tags[1]); return
+            rel_path  = tags[0]
+            full_path = os.path.abspath(os.path.join(cfg["share_path"], rel_path))
+            if os.path.isdir(full_path) or ext == "DIR":
+                self._refresh_files(rel_path); return
+            try: os.startfile(full_path)
+            except Exception as e: messagebox.showerror("Erro", str(e))
+        except Exception: pass
 
     def _dialog_add_files(self):
         ps = filedialog.askopenfilenames(title=_T("dlg_select_files"))
@@ -2219,37 +2245,49 @@ class LinkDropGUI:
         if f: self._import_paths_list([f])
 
     def _delete_file(self):
-        sel = self.file_tree.selection()
-        if not sel: return
-        names = [self.file_tree.item(i, "values")[0] for i in sel]
-        if messagebox.askyesno(_T("btn_delete"), _T("dlg_delete_confirm").format(len(names))):
-            for n in names:
-                p = os.path.join(cfg["share_path"], n)
-                try:
-                    if os.path.isdir(p): shutil.rmtree(p)
-                    else: os.remove(p)
-                except: pass
-            self._refresh_files()
+        try:
+            if not hasattr(self, 'file_tree') or not self.file_tree.winfo_exists(): return
+            sel = self.file_tree.selection()
+            if not sel: return
+            names = [self.file_tree.item(i, "values")[0] for i in sel]
+            if messagebox.askyesno(_T("btn_delete"), _T("dlg_delete_confirm").format(len(names))):
+                for n in names:
+                    p = os.path.join(cfg["share_path"], n)
+                    try:
+                        if os.path.isdir(p): shutil.rmtree(p)
+                        else: os.remove(p)
+                    except: pass
+                self._refresh_files()
+        except Exception: pass
 
     def _load_pc_clipboard(self):
-        pc = _get_pyperclip()
-        if pc: self.clip_box.delete("1.0", "end"); self.clip_box.insert("end", pc.paste())
-        else:  messagebox.showwarning(_T("tab_clipboard"), _T("dlg_no_pyperclip"))
+        try:
+            if not hasattr(self, 'clip_box') or not self.clip_box.winfo_exists(): return
+            pc = _get_pyperclip()
+            if pc: self.clip_box.delete("1.0", "end"); self.clip_box.insert("end", pc.paste())
+            else:  messagebox.showwarning(_T("tab_clipboard"), _T("dlg_no_pyperclip"))
+        except Exception: pass
 
     def _copy_clip_to_pc(self):
-        text = self.clip_box.get("1.0", "end").strip()
-        pc   = _get_pyperclip()
-        if pc:
-            try: pc.copy(text)
-            except: pass
-        messagebox.showinfo(_T("tab_clipboard"), _T("dlg_clip_copied"))
+        try:
+            if not hasattr(self, 'clip_box') or not self.clip_box.winfo_exists(): return
+            text = self.clip_box.get("1.0", "end").strip()
+            pc   = _get_pyperclip()
+            if pc:
+                try: pc.copy(text)
+                except: pass
+            messagebox.showinfo(_T("tab_clipboard"), _T("dlg_clip_copied"))
+        except Exception: pass
 
     def _send_text_to_phone(self):
-        txt = self.quick_text.get("1.0", "end").strip()
-        if not txt: return
-        fn = "from_pc_%s.txt" % datetime.now().strftime("%Y%m%d_%H%M%S")
-        with open(os.path.join(cfg["share_path"], fn), "w", encoding="utf-8") as f:
-            f.write(txt)
+        try:
+            if not hasattr(self, 'quick_text') or not self.quick_text.winfo_exists(): return
+            txt = self.quick_text.get("1.0", "end").strip()
+            if not txt: return
+            fn = "from_pc_%s.txt" % datetime.now().strftime("%Y%m%d_%H%M%S")
+            with open(os.path.join(cfg["share_path"], fn), "w", encoding="utf-8") as f:
+                f.write(txt)
+        except Exception: pass
         self._refresh_files(); self.quick_text.delete("1.0", "end")
 
     def _save_settings(self):
