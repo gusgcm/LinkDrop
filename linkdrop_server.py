@@ -742,10 +742,9 @@ class LinkDropHandler(BaseHTTPRequestHandler):
 
         if path == "/ping":
             auth_header = self.headers.get("X-LinkDrop-Auth", "")
-            if auth_header:
-                if not check_auth(self.headers):
-                    self._send_json(401, {"error": "Unauthorized"}); return
-            self._send_json(200, {"status": "ok", "version": APP_VERSION, "name": _HOSTNAME}); return
+            if auth_header and not check_auth(self.headers):
+                self._send_json(401, {"error": "Unauthorized", "status": "error", "name": None}); return
+            self._send_json(200, {"status": "ok", "version": APP_VERSION, "name": _HOSTNAME or "LinkDrop-PC"}); return
 
         if not check_auth(self.headers):
             self._send_json(401, {"error": "Unauthorized"}); return
