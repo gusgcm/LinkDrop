@@ -51,7 +51,13 @@ def resource_path(rp):
 
 APP_VERSION  = "1.0.3"
 DEFAULT_PORT = 8765
-_HOSTNAME    = socket.gethostname() or "LinkDrop-PC"
+_HOSTNAME    = socket.gethostname()
+if not _HOSTNAME:
+    try:
+        import platform
+        _HOSTNAME = platform.node() or "LinkDrop-PC"
+    except:
+        _HOSTNAME = "LinkDrop-PC"
 _CHUNK       = 131072  # 128KB
 
 TRANSLATIONS = {
@@ -735,8 +741,10 @@ class LinkDropHandler(BaseHTTPRequestHandler):
         path   = parsed.path.rstrip("/")
 
         if path == "/ping":
-            if not check_auth(self.headers):
-                self._send_json(401, {"error": "Unauthorized"}); return
+            auth_header = self.headers.get("X-LinkDrop-Auth", "")
+            if auth_header:
+                if not check_auth(self.headers):
+                    self._send_json(401, {"error": "Unauthorized"}); return
             self._send_json(200, {"status": "ok", "version": APP_VERSION, "name": _HOSTNAME}); return
 
         if not check_auth(self.headers):
