@@ -49,7 +49,7 @@ def resource_path(rp):
     base = sys._MEIPASS if (getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS')) else os.path.abspath(".")
     return os.path.join(base, rp)
 
-APP_VERSION  = "1.0.3"
+APP_VERSION  = "1.0.4"
 DEFAULT_PORT = 8765
 _HOSTNAME    = socket.gethostname()
 if not _HOSTNAME:
@@ -58,7 +58,7 @@ if not _HOSTNAME:
         _HOSTNAME = platform.node() or "LinkDrop-PC"
     except:
         _HOSTNAME = "LinkDrop-PC"
-_CHUNK       = 131072  # 128KB
+_CHUNK       = 4194304 # 4MB
 
 TRANSLATIONS = {
     "pt": {
@@ -933,7 +933,7 @@ class LinkDropGUI:
         self._dnd_old_proc = None
         self._shutdown_flag = False
 
-        self._refresh_interval = 3000   
+        self._refresh_interval = 1000   
         self._last_activity_ts = 0.0
 
         self._setup_root()
